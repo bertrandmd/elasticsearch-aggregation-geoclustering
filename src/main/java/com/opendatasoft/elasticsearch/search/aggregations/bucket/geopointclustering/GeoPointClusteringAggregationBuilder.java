@@ -38,10 +38,10 @@ public class GeoPointClusteringAggregationBuilder extends ValuesSourceAggregatio
         new ValuesSourceRegistry.RegistryKey<>(NAME, GeoPointClusteringAggregatorSupplier.class);
 
     static final int DEFAULT_ZOOM = 1;
-    static final int DEFAULT_EXTENT = 256;
-    static final int DEFAULT_MAX_NUM_CELLS = 10000;
-    static final int DEFAULT_RADIUS = 40;
-    static final double DEFAULT_RATIO = 0;
+    public static final int DEFAULT_EXTENT = 256;
+    public static final int DEFAULT_MAX_NUM_CELLS = 10000;
+    public static final int DEFAULT_RADIUS = 40;
+    public static final double DEFAULT_RATIO = 0;
 
     public static final ObjectParser<GeoPointClusteringAggregationBuilder, String> PARSER = ObjectParser.fromBuilder(
         NAME,

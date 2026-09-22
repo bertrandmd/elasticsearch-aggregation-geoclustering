@@ -146,6 +146,153 @@ Result:
 ```
 
 
+## Vector tile API
+
+The aggregation gives you clusters, but a map client needs a bit more: tiles, single points rendered as points instead
+of clusters of one, and the zoom a cluster breaks apart at. The plugin ships two endpoints doing all of that inside
+Elasticsearch, so that no service has to sit between the map and the cluster.
+
+### Clustered tiles
+
+```
+GET  /<index>/_geo_point_clustering/_mvt/<field>/<z>/<x>/<y>
+POST /<index>/_geo_point_clustering/_mvt/<field>/<z>/<x>/<y>
+```
+
+Returns a [Mapbox Vector Tile](https://github.com/mapbox/vector-tile-spec/tree/master/2.1)
+(`application/vnd.mapbox-vector-tile`) with two point layers:
+
+| Layer | Content |
+| --- | --- |
+| `clusters` | one point per cluster of two documents or more |
+| `pois` | the documents that are alone in their cluster, and every document above `cluster_max_zoom` |
+
+`clusters` features carry:
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `cluster` | boolean | always `true`, to style both layers with a single expression |
+| `point_count` | integer | number of documents in the cluster |
+| `point_count_abbreviated` | string | `1.2k`, `24k`… same rules as supercluster |
+| `geohash_grids` | string | comma separated geohash cells of the cluster, to be passed back to the expansion endpoint |
+| `expansion_zoom` | integer | zoom to zoom to in order to break the cluster apart (see below) |
+
+`pois` features carry `cluster: false`, the document id (as the vector tile feature id when it is numeric, and always as
+the `id` property) and the source fields listed in `fields`.
+
+Every parameter can be given either in the query string or in the request body, so a plain tile URL is enough to drive
+the whole thing:
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `radius` | `40` | clustering radius, in `extent` pixels |
+| `extent` | `256` | tile size, in pixels, the `radius` is expressed in |
+| `ratio` | `0` | second merging pass ratio of the aggregation |
+| `cluster_max_zoom` | `16` | above this zoom, clustering is turned off and documents are returned as points |
+| `buffer` | `2 * radius` | pixels the queried area is expanded by, so that clusters are not cut by tile borders |
+| `mvt_extent` | `4096` | coordinate extent of the returned tile |
+| `size` | `10000` | maximum number of clusters per tile |
+| `max_hits` | `10000` | maximum number of documents per tile above `cluster_max_zoom` |
+| `fields` | none | comma separated source fields to put in the `pois` features |
+| `include_id` | `true` | fetch the document ids of single points |
+| `expansion_zoom` | `true` | compute the `expansion_zoom` property of the clusters |
+| `expansion_zoom_depth` | `4` | how many zoom levels ahead the expansion zoom is looked for |
+| `clusters_layer` / `pois_layer` | `clusters` / `pois` | layer names |
+| `q` | none | [query string](https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl-query-string-query.html) filtering the documents, along with the usual `df`, `analyzer`, `analyze_wildcard`, `lenient` and `default_operator` |
+| `preference`, `routing` | none | passed to the underlying search |
+
+The request body accepts the same parameters, plus a full `query` (any query DSL) and `runtime_mappings`. Body values
+win over query string ones, and `q` and `query` are combined:
+
+```json
+POST /pois/_geo_point_clustering/_mvt/location/12/2074/1409
+{
+  "radius": 60,
+  "extent": 512,
+  "cluster_max_zoom": 17,
+  "fields": ["name", "category_name"],
+  "query": {
+    "bool": {
+      "filter": [
+        { "terms": { "category_name": ["bar", "cafe"] } }
+      ]
+    }
+  }
+}
+```
+
+### Expansion zoom
+
+`expansion_zoom` is the equivalent of supercluster's `getClusterExpansionZoom()`: the first zoom level at which a
+cluster breaks into several clusters. Tiles carry it as a cluster property, computed by clustering the same area at the
+next `expansion_zoom_depth` zoom levels in the very same search request, so a click handler needs no round trip:
+
+```js
+map.on('click', 'clusters', (e) => {
+  const cluster = e.features[0];
+  map.easeTo({ center: cluster.geometry.coordinates, zoom: cluster.properties.expansion_zoom });
+});
+```
+
+A cluster that does not break within `expansion_zoom_depth` levels reports the deepest level that was looked at, which
+still moves the map closer to the split. When the exact value is needed, ask for it:
+
+```
+GET  /<index>/_geo_point_clustering/_expansion/<field>?zoom=12&cells=u09tz,u09tw
+POST /<index>/_geo_point_clustering/_expansion/<field>
+```
+
+`cells` holds the `geohash_grids` property of the clicked cluster, as is. `zoom` is the zoom the cluster was rendered
+at. `radius`, `extent`, `ratio`, `q` and the body `query` must match the ones the tile was built with; `max_zoom`
+(default `18`) bounds the search. The answer is the expansion zoom and the clusters found there:
+
+```json
+{
+  "zoom": 14,
+  "bucket_count": 2,
+  "doc_count": 57,
+  "clusters": [
+    { "geohash_grids": ["u09tz"], "doc_count": 31, "centroid": { "lat": 48.83, "lon": 2.38 } },
+    { "geohash_grids": ["u09tw"], "doc_count": 26, "centroid": { "lat": 48.86, "lon": 2.25 } }
+  ]
+}
+```
+
+### Using it from MapLibre GL JS
+
+```js
+map.addSource('pois', {
+  type: 'vector',
+  tiles: [
+    'http://localhost:9200/pois/_geo_point_clustering/_mvt/location/{z}/{x}/{y}' +
+    '?radius=60&extent=512&cluster_max_zoom=17&fields=name,category_name'
+  ],
+  maxzoom: 20
+});
+
+map.addLayer({ id: 'clusters', type: 'circle', source: 'pois', 'source-layer': 'clusters' });
+map.addLayer({
+  id: 'cluster-count', type: 'symbol', source: 'pois', 'source-layer': 'clusters',
+  layout: { 'text-field': ['get', 'point_count_abbreviated'] }
+});
+map.addLayer({ id: 'pois', type: 'circle', source: 'pois', 'source-layer': 'pois' });
+```
+
+Tiles are filtered by appending `&q=category_name:bar` to the URL, which makes an interactive search a plain source
+URL change.
+
+### Good to know
+
+- Clusters are built from a buffered area around the tile, then rendered by the single tile owning their centroid:
+  no cluster is cut by a tile border, and none is drawn twice.
+- Clustered tiles are aggregation only searches (`size: 0`), so they go through the shard request cache.
+- Above `cluster_max_zoom`, document positions are read from the doc values of the geo field: keep `doc_values`
+  enabled on it, which is the default.
+- `expansion_zoom` costs one extra aggregation per zoom level looked ahead. Lower `expansion_zoom_depth`, or turn it
+  off with `expansion_zoom=false` and use the expansion endpoint instead, on very large tiles. Mind
+  `search.max_buckets` too: a tile runs `1 + expansion_zoom_depth` aggregations of up to `size` buckets each.
+
+
 ## Development environment setup
 
 ### Build

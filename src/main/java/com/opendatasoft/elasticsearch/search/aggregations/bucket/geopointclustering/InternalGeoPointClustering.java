@@ -26,7 +26,7 @@ public class InternalGeoPointClustering extends InternalMultiBucketAggregation<
     InternalGeoPointClustering,
     InternalGeoPointClustering.Bucket> implements GeoPointClustering {
 
-    static class Bucket extends InternalMultiBucketAggregation.InternalBucketWritable
+    public static class Bucket extends InternalMultiBucketAggregation.InternalBucketWritable
         implements
             GeoPointClustering.Bucket,
             Comparable<Bucket> {
@@ -97,6 +97,21 @@ public class InternalGeoPointClustering extends InternalMultiBucketAggregation<
             return hashAsLong;
         }
 
+        /**
+         * @return the centroid of the cluster, weighted by the document count of the merged geohash cells.
+         */
+        public GeoPoint getCentroid() {
+            return centroid;
+        }
+
+        /**
+         * @return the geohash cells this cluster is made of, sorted for a stable output. A cluster holds several cells
+         *         when close cells have been merged during the reduce phase.
+         */
+        public List<String> getGeohashGrids() {
+            return geohashesList.stream().map(Geohash::stringEncode).sorted().collect(Collectors.toList());
+        }
+
         @Override
         public InternalAggregations getAggregations() {
             return aggregations;
@@ -109,7 +124,7 @@ public class InternalGeoPointClustering extends InternalMultiBucketAggregation<
 
         final void bucketToXContent(XContentBuilder builder, ToXContent.Params params) throws IOException {
             builder.startObject();
-            builder.field("geohash_grids", geohashesList.stream().map(Geohash::stringEncode).collect(Collectors.toList()));
+            builder.field("geohash_grids", getGeohashGrids());
             builder.field(CommonFields.DOC_COUNT.getPreferredName(), docCount);
             builder.field("centroid", centroid);
             aggregations.toXContentInternal(builder, params);

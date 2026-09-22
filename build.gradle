@@ -48,6 +48,9 @@ esplugin {
 def versions = org.elasticsearch.gradle.VersionProperties.versions
 dependencies {
     implementation "org.elasticsearch:elasticsearch:${es_version}"
+    testImplementation "org.elasticsearch.test:framework:${es_version}"
+    // the yaml rest tests reuse the vector tile decoder of the unit tests
+    yamlRestTestImplementation sourceSets.test.output
     yamlRestTestImplementation "org.elasticsearch.test:framework:${es_version}"
     yamlRestTestImplementation "org.elasticsearch.test:yaml-rest-runner:${es_version}"
     yamlRestTestImplementation "org.apache.logging.log4j:log4j-core:${versions.log4j}"
