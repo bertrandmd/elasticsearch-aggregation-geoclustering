@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>geo_point_clustering – tuiles vectorielles</title>
+  <link href="https://unpkg.com/maplibre-gl@5.14.0/dist/maplibre-gl.css" rel="stylesheet">
+  <script src="https://unpkg.com/maplibre-gl@5.14.0/dist/maplibre-gl.js"></script>
+  <style>
+    html, body, #map { width: 100%; height: 100%; margin: 0; }
+    body { font: 12px/1.45 system-ui, sans-serif; }
+
+    .panel {
+      position: absolute; z-index: 10; background: #fff;
+      border-radius: 6px; box-shadow: 0 1px 6px #0003; padding: 10px;
+    }
+    #controls { top: 10px; left: 50px; display: grid; gap: 8px; width: 270px; }
+    #status { bottom: 10px; left: 10px; max-width: 420px; }
+
+    .row { display: flex; gap: 6px; align-items: center; }
+    .row > label { flex: 0 0 96px; color: #555; }
+    .row > input { flex: 1; min-width: 0; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; }
+    .row.small > label { flex: 0 0 auto; }
+    button { padding: 5px 10px; border: 1px solid #ccc; border-radius: 4px; background: #f6f6f6; cursor: pointer; }
+    button:hover { background: #eee; }
+    fieldset { border: 1px solid #eee; border-radius: 4px; margin: 0; padding: 8px; display: grid; gap: 6px; }
+    legend { color: #888; padding: 0 4px; }
+
+    #status dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+    #status dt { color: #888; }
+    #status dd { margin: 0; font-variant-numeric: tabular-nums; }
+    #status code { word-break: break-all; font-size: 11px; }
+    .error { color: #b00; }
+    .ok { color: #070; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="controls" class="panel">
+  <div class="row"><label for="q">Recherche</label><input id="q" placeholder="nom ou catégorie"></div>
+  <div class="row"><label for="cat">Catégories</label><input id="cat" placeholder="TRE,TCE"></div>
+  <fieldset>
+    <legend>clustering</legend>
+    <div class="row"><label for="radius">radius</label><input id="radius" type="number" min="1"></div>
+    <div class="row"><label for="extent">extent</label><input id="extent" type="number" min="1"></div>
+    <div class="row"><label for="cmz">cluster_max_zoom</label><input id="cmz" type="number" min="0" max="25"></div>
+  </fieldset>
+  <label class="row small"><input id="exact" type="checkbox"> zoom d'expansion exact (API)</label>
+  <div class="row"><button id="apply">Appliquer</button><button id="probe">Tester une tuile</button></div>
+</div>
+
+<div id="status" class="panel">
+  <dl>
+    <dt>zoom</dt><dd id="s-zoom">–</dd>
+    <dt>mode</dt><dd id="s-mode">–</dd>
+    <dt>source</dt><dd id="s-counts">–</dd>
+    <dt>tuile</dt><dd><code id="s-url">–</code></dd>
+  </dl>
+  <div id="s-msg"></div>
+</div>
+
+<script type="module">
+// ---------------------------------------------------------------------------
+// Page de test de la source `geo_point_clustering` : une source vectorielle
+// MapLibre pointant directement sur Elasticsearch, sans service intermédiaire.
+//
+// Tout se règle dans l'URL, par exemple :
+//   ?es=http://localhost:9200&index=pois&field=location&fields=name,category_name
+//   &apikey=<base64>&style=./uta-style-31698-.json
+// ---------------------------------------------------------------------------
+const url = new URL(location.href);
+const param = (name, fallback) => url.searchParams.get(name) ?? fallback;
+
+const ES = param("es", "http://localhost:9200").replace(/\/+$/, "");
+const INDEX = param("index", "pois");
+const FIELD = param("field", "location");
+const FIELDS = param("fields", "name,category_name");
+const NAME_FIELD = param("name_field", "name");
+const CATEGORY_FIELD = param("category_field", "category_name");
+const API_KEY = param("apikey", "");
+const STYLE_URL = param("style", "");
+const BASEMAP = param("basemap", "osm");
+const GLYPHS = param("glyphs", "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf");
+const TEXT_FONT = param("font", "Open Sans Semibold").split(",").map(f => f.trim());
+const AVATAR_URL = param("avatar", "");
+
+const state = {
+  q: param("q", ""),
+  cat: param("cat", ""),
+  radius: Number(param("radius", 60)),
+  extent: Number(param("extent", 512)),
+  clusterMaxZoom: Number(param("cluster_max_zoom", 17)),
+  expansionZoomDepth: Number(param("expansion_zoom_depth", 4)),
+  exactExpansion: false,
+};
+
+// --- requête utilisateur -> query_string Lucene -----------------------------
+// Une source vectorielle MapLibre ne sait faire que des GET sans corps : le
+// filtrage passe donc par `q`, la syntaxe query_string d'Elasticsearch. Pour un
+// filtre plus riche (bool, geo, script), faire un POST avec un corps `query`.
+const luceneEscape = s => s.replace(/([+\-!(){}[\]^"~*?:\\/]|&&|\|\|)/g, "\\$1");
+const phrase = s => `"${s.replace(/(["\\])/g, "\\$1")}"`;
+
+function queryString() {
+  const clauses = [];
+
+  const text = state.q.trim();
+  if (text) {
+    const prefixes = text.split(/\s+/).map(luceneEscape).map(w => `${w}*`).join(" AND ");
+    clauses.push(`(${NAME_FIELD}:(${prefixes}) OR ${CATEGORY_FIELD}:${phrase(text)})`);
+  }
+
+  const categories = state.cat.split(",").map(c => c.trim()).filter(Boolean);
+  if (categories.length) {
+    clauses.push(`${CATEGORY_FIELD}:(${categories.map(phrase).join(" OR ")})`);
+  }
+
+  return clauses.join(" AND ");
+}
+
+function tileParams() {
+  const params = new URLSearchParams({
+    radius: state.radius,
+    extent: state.extent,
+    cluster_max_zoom: state.clusterMaxZoom,
+    expansion_zoom_depth: state.expansionZoomDepth,
+    fields: FIELDS,
+  });
+  const q = queryString();
+  if (q) {
+    params.set("q", q);
+    // Sans cela les termes à joker ne sont pas analysés : la casse compterait.
+    params.set("analyze_wildcard", "true");
+  }
+  return params;
+}
+
+const tilesUrl = () =>
+  `${ES}/${INDEX}/_geo_point_clustering/_mvt/${FIELD}/{z}/{x}/{y}?${tileParams()}`;
+
+// L'endpoint d'expansion a ses propres paramètres : lui passer ceux de la tuile
+// (fields, cluster_max_zoom…) serait rejeté en 400.
+function expansionUrl(cells, zoom) {
+  const params = new URLSearchParams({
+    zoom,
+    cells,
+    radius: state.radius,
+    extent: state.extent,
+    max_zoom: Math.min(Math.max(zoom + 1, state.clusterMaxZoom + 1), 25),
+  });
+  const q = queryString();
+  if (q) {
+    params.set("q", q);
+    params.set("analyze_wildcard", "true");
+  }
+  return `${ES}/${INDEX}/_geo_point_clustering/_expansion/${FIELD}?${params}`;
+}
+
+const authHeaders = API_KEY ? { Authorization: `ApiKey ${API_KEY}` } : {};
+
+// --- icônes : rastérisées à la résolution de l'écran, rendues à icon-size 1 --
+const DPR = Math.min(window.devicePixelRatio || 1, 3);
+const AVATAR_CSS = 64, AVATAR_BORDER_CSS = 3;
+const BADGE_CSS = 30, BADGE_BORDER_CSS = 1.5, BADGE_OFFSET_CSS = 25;
+const AVATAR_PX = Math.round(AVATAR_CSS * DPR);
+const BADGE_PX = Math.round(BADGE_CSS * DPR);
+
+function canvasImage(canvas) {
+  const ctx = canvas.getContext("2d");
+  return { width: canvas.width, height: canvas.height, data: ctx.getImageData(0, 0, canvas.width, canvas.height).data };
+}
+
+function loadHtmlImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("image inaccessible : " + src));
+    img.src = src;
+  });
+}
+
+function makeAvatar(img, px, borderPx) {
+  const c = document.createElement("canvas");
+  c.width = c.height = px;
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
+  const center = px / 2;
+  const radius = center - borderPx;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.clip();
+  if (img) {
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    const sx = (img.naturalWidth - side) / 2;
+    const sy = (img.naturalHeight - side) / 2;
+    ctx.drawImage(img, sx, sy, side, side, borderPx, borderPx, px - 2 * borderPx, px - 2 * borderPx);
+  } else {
+    ctx.fillStyle = "#2b6cb0";
+    ctx.fillRect(0, 0, px, px);
+  }
+  ctx.restore();
+
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = borderPx;
+  ctx.stroke();
+  return canvasImage(c);
+}
+
+function makeBadge(px, borderPx) {
+  const c = document.createElement("canvas");
+  c.width = c.height = px;
+  const ctx = c.getContext("2d");
+  ctx.beginPath();
+  ctx.arc(px / 2, px / 2, px / 2 - borderPx / 2, 0, Math.PI * 2);
+  ctx.fillStyle = "#fff";
+  ctx.fill();
+  ctx.strokeStyle = "#222";
+  ctx.lineWidth = borderPx;
+  ctx.stroke();
+  return canvasImage(c);
+}
+
+let avatarSource = null;
+if (AVATAR_URL) {
+  try {
+    avatarSource = await loadHtmlImage(`${AVATAR_URL}${AVATAR_URL.includes("?") ? "&" : "?"}width=${AVATAR_PX}&height=${AVATAR_PX}`);
+  } catch (e) {
+    console.warn(e.message, "– cercle uni utilisé à la place");
+  }
+}
+const avatar = makeAvatar(avatarSource, AVATAR_PX, Math.round(AVATAR_BORDER_CSS * DPR));
+const badge = makeBadge(BADGE_PX, BADGE_BORDER_CSS * DPR);
+
+// --- style ------------------------------------------------------------------
+function fallbackStyle() {
+  const style = { version: 8, glyphs: GLYPHS, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#eceff1" } }] };
+  if (BASEMAP === "osm") {
+    style.sources.osm = {
+      type: "raster",
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    };
+    style.layers.push({ id: "osm", type: "raster", source: "osm" });
+  }
+  return style;
+}
+
+const style = STYLE_URL ? await (await fetch(STYLE_URL)).json() : fallbackStyle();
+style.sources ||= {};
+style.layers ||= [];
+style.glyphs ||= GLYPHS;
+
+// Un style maison peut déjà porter un rendu de POI : on le réutilise tel quel
+// sur la couche `pois` de la tuile, pour comparer à l'existant.
+const templatePoiLayer = style.layers.find(l => l.id === param("poi_layer_template", "indoor-wemap-markers-poi-default-geo"));
+
+const SOURCE = "es_clustering";
+style.sources[SOURCE] = { type: "vector", tiles: [tilesUrl()], minzoom: 0, maxzoom: 22 };
+
+const COUNT_TEXT_SIZE = 13;
+const COUNT_OFFSET_EM = BADGE_OFFSET_CSS / COUNT_TEXT_SIZE;
+
+style.layers.push({
+  id: "clusters", type: "symbol", source: SOURCE, "source-layer": "clusters",
+  layout: { "icon-image": "cluster", "icon-size": 1, "icon-allow-overlap": true, "icon-ignore-placement": true },
+});
+
+style.layers.push({
+  id: "cluster-badge", type: "symbol", source: SOURCE, "source-layer": "clusters",
+  layout: {
+    "icon-image": "cluster-badge", "icon-size": 1,
+    "icon-offset": [BADGE_OFFSET_CSS, -BADGE_OFFSET_CSS],
+    "icon-allow-overlap": true, "icon-ignore-placement": true,
+  },
+});
+
+style.layers.push({
+  id: "cluster-count", type: "symbol", source: SOURCE, "source-layer": "clusters",
+  layout: {
+    "text-field": ["get", "point_count_abbreviated"],
+    "text-size": COUNT_TEXT_SIZE,
+    "text-font": TEXT_FONT,
+    "text-offset": [COUNT_OFFSET_EM, -COUNT_OFFSET_EM],
+    "text-allow-overlap": true, "text-ignore-placement": true,
+  },
+  paint: { "text-color": "#111", "text-halo-color": "#fff", "text-halo-width": 0.5 },
+});
+
+if (templatePoiLayer) {
+  const poiLayer = structuredClone(templatePoiLayer);
+  poiLayer.id = "pois";
+  poiLayer.source = SOURCE;
+  poiLayer["source-layer"] = "pois";
+  poiLayer.filter = ["==", ["geometry-type"], "Point"];
+  poiLayer.layout ||= {};
+  poiLayer.layout.visibility = "visible";
+  style.layers.push(poiLayer);
+} else {
+  style.layers.push({
+    id: "pois", type: "circle", source: SOURCE, "source-layer": "pois",
+    paint: { "circle-radius": 5, "circle-color": "#e53935", "circle-stroke-color": "#fff", "circle-stroke-width": 1.5 },
+  });
+}
+
+// --- carte ------------------------------------------------------------------
+const map = new maplibregl.Map({
+  container: "map",
+  style,
+  hash: true,
+  center: [Number(param("lon", 2.35)), Number(param("lat", 48.85))],
+  zoom: Number(param("zoom", 11)),
+  fadeDuration: 100,
+  transformRequest: (requestUrl) =>
+    requestUrl.startsWith(ES) ? { url: requestUrl, headers: authHeaders } : undefined,
+});
+window.map = map;
+
+map.addImage("cluster", avatar, { pixelRatio: DPR });
+map.addImage("cluster-badge", badge, { pixelRatio: DPR });
+map.addControl(new maplibregl.NavigationControl());
+map.addControl(new maplibregl.ScaleControl());
+
+// --- panneau d'état ---------------------------------------------------------
+const el = id => document.getElementById(id);
+const message = (text, kind = "") => { el("s-msg").className = kind; el("s-msg").textContent = text; };
+
+function refreshStatus() {
+  const zoom = map.getZoom();
+  el("s-zoom").textContent = zoom.toFixed(2);
+  el("s-mode").textContent = zoom <= state.clusterMaxZoom ? "clusters" : `points bruts (> ${state.clusterMaxZoom})`;
+
+  const clusters = map.querySourceFeatures(SOURCE, { sourceLayer: "clusters" });
+  const pois = map.querySourceFeatures(SOURCE, { sourceLayer: "pois" });
+  const points = clusters.reduce((total, f) => total + (Number(f.properties.point_count) || 0), 0);
+  el("s-counts").textContent = `${clusters.length} clusters (${points} points) · ${pois.length} pois`;
+  el("s-url").textContent = tilesUrl();
+}
+
+map.on("error", e => {
+  const failed = e.error?.url || "";
+  if (failed.startsWith(ES)) {
+    message(
+      `Tuile en erreur (${e.error?.status || "réseau"}). Vérifier que le plugin est installé, et côté nœud : `
+      + `http.cors.enabled: true, http.cors.allow-origin: "*"`
+      + (API_KEY ? ', http.cors.allow-headers incluant Authorization' : ""),
+      "error"
+    );
+  }
+  console.error(e.error || e);
+});
+
+map.on("moveend", refreshStatus);
+map.on("idle", refreshStatus);
+
+// --- interactions -----------------------------------------------------------
+async function exactExpansionZoom(feature) {
+  const response = await fetch(expansionUrl(feature.properties.geohash_grids, Math.floor(map.getZoom())), { headers: authHeaders });
+  if (!response.ok) throw new Error(`expansion: HTTP ${response.status}`);
+  return response.json();
+}
+
+async function expandCluster(feature) {
+  const [lon, lat] = feature.geometry.coordinates;
+  let target = Number(feature.properties.expansion_zoom);
+
+  if (state.exactExpansion && feature.properties.geohash_grids && map.getZoom() < 25) {
+    try {
+      const expansion = await exactExpansionZoom(feature);
+      target = expansion.zoom;
+      message(`expansion exacte : zoom ${expansion.zoom}, ${expansion.bucket_count} clusters, ${expansion.doc_count} points`, "ok");
+    } catch (e) {
+      message(e.message, "error");
+    }
+  }
+
+  if (!Number.isFinite(target)) target = Math.floor(map.getZoom()) + 1;
+  target = Math.max(Math.floor(map.getZoom()) + 1, target);
+
+  map.easeTo({ center: [lon, lat], zoom: target, duration: 260, easing: t => 1 - Math.pow(1 - t, 3) });
+}
+
+map.on("load", () => {
+  refreshStatus();
+
+  map.on("click", "clusters", e => { if (e.features?.[0]) expandCluster(e.features[0]); });
+
+  map.on("click", "pois", e => {
+    const feature = e.features?.[0];
+    if (!feature) return;
+    const escape = value => String(value).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+    const rows = Object.entries(feature.properties)
+      .map(([key, value]) => `<tr><td style="color:#888;padding-right:8px">${escape(key)}</td><td>${escape(value)}</td></tr>`)
+      .join("");
+    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<table style="font:12px system-ui">${rows}</table>`).addTo(map);
+  });
+
+  for (const id of ["clusters", "pois"]) {
+    map.on("mouseenter", id, () => (map.getCanvas().style.cursor = "pointer"));
+    map.on("mouseleave", id, () => (map.getCanvas().style.cursor = ""));
+  }
+});
+
+// --- contrôles --------------------------------------------------------------
+el("q").value = state.q;
+el("cat").value = state.cat;
+el("radius").value = state.radius;
+el("extent").value = state.extent;
+el("cmz").value = state.clusterMaxZoom;
+
+el("apply").onclick = () => {
+  state.q = el("q").value.trim();
+  state.cat = el("cat").value.trim();
+  state.radius = Number(el("radius").value) || state.radius;
+  state.extent = Number(el("extent").value) || state.extent;
+  state.clusterMaxZoom = Number(el("cmz").value);
+
+  message("");
+  map.getSource(SOURCE).setTiles([tilesUrl()]);
+  refreshStatus();
+};
+
+el("exact").onchange = e => (state.exactExpansion = e.target.checked);
+
+// Une requête brute sur la tuile courante : le moyen le plus court de voir un
+// 401, un 403 CORS ou une erreur de mapping.
+el("probe").onclick = async () => {
+  const zoom = Math.floor(map.getZoom());
+  const tiles = 2 ** zoom;
+  const center = map.getCenter();
+  const x = Math.floor(((center.lng + 180) / 360) * tiles);
+  const latRad = (center.lat * Math.PI) / 180;
+  const y = Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * tiles);
+  const probeUrl = tilesUrl().replace("{z}", zoom).replace("{x}", x).replace("{y}", y);
+
+  message(`GET ${zoom}/${x}/${y}…`);
+  try {
+    const response = await fetch(probeUrl, { headers: authHeaders });
+    const body = await response.arrayBuffer();
+    if (!response.ok) {
+      message(`HTTP ${response.status} – ${new TextDecoder().decode(body).slice(0, 300)}`, "error");
+      return;
+    }
+    message(
+      `HTTP ${response.status} · ${response.headers.get("content-type")} · ${body.byteLength} octets`,
+      "ok"
+    );
+  } catch (e) {
+    message(`${e.message} (CORS ou nœud injoignable)`, "error");
+  }
+};
+</script>
+</body>
+</html>

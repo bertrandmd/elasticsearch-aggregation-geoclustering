@@ -281,6 +281,17 @@ map.addLayer({ id: 'pois', type: 'circle', source: 'pois', 'source-layer': 'pois
 Tiles are filtered by appending `&q=category_name:bar` to the URL, which makes an interactive search a plain source
 URL change.
 
+A ready to run test page sits in [`examples/maplibre-clustered-tiles.html`](examples/maplibre-clustered-tiles.html). Open it
+with `?es=http://localhost:9200&index=pois&field=location`: it draws both layers, filters them, expands clusters on click
+(through the tile property or the expansion endpoint) and can fetch a single tile to tell an authentication problem from a
+CORS one. Reaching Elasticsearch straight from a browser needs CORS to be enabled on the nodes:
+
+```yaml
+http.cors.enabled: true
+http.cors.allow-origin: "*"
+http.cors.allow-headers: X-Requested-With, Content-Type, Content-Length, Authorization
+```
+
 ### Good to know
 
 - Clusters are built from a buffered area around the tile, then rendered by the single tile owning their centroid:
