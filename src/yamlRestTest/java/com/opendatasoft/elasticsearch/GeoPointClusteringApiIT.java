@@ -168,6 +168,17 @@ public class GeoPointClusteringApiIT extends ESRestTestCase {
         }
     }
 
+    public void testClusteringCanBeTurnedOff() throws IOException {
+        // A zoom that would normally cluster: with cluster=false every document comes back as a point.
+        Request request = new Request("GET", TILE_PATH);
+        request.addParameter("cluster", "false");
+        request.addParameter("fields", "name");
+        Map<String, VectorTileDecoder.Layer> layers = decode(client().performRequest(request));
+
+        assertEquals(0, layers.get("clusters").features().size());
+        assertEquals(POINTS.length, layers.get("pois").features().size());
+    }
+
     public void testExpansionZoomEndpoint() throws IOException {
         Request tileRequest = new Request("GET", TILE_PATH);
         Map<String, VectorTileDecoder.Layer> layers = decode(client().performRequest(tileRequest));

@@ -95,6 +95,23 @@ public class GeoPointClusteringTileRequestTests extends ESTestCase {
         assertEquals(-180 + 360.0 * 260 / 512, boundingBox.bottomRight().getLon(), 1e-9);
     }
 
+    public void testClusteringCanBeTurnedOffAltogether() throws IOException {
+        GeoPointClusteringTileRequest request = parse(Map.of("cluster", "false", "max_hits", "2000", "fields", "name"));
+        assertFalse(request.isClustered());
+        assertEquals(0, request.expansionZooms().length);
+
+        // Same request as above cluster_max_zoom: every document of the tile, as points.
+        SearchSourceBuilder source = request.toSearchRequest().source();
+        assertNull(source.aggregations());
+        assertEquals(2000, source.size());
+        assertEquals("point", source.docValueFields().get(0).field);
+
+        // The queried area is the tile itself, clusters are what needs a buffered one.
+        GeoBoundingBoxQueryBuilder boundingBox = boundingBox(source);
+        assertEquals(-180 + 360.0 * 259 / 512, boundingBox.topLeft().getLon(), 1e-9);
+        assertEquals(-180 + 360.0 * 260 / 512, boundingBox.bottomRight().getLon(), 1e-9);
+    }
+
     public void testQueryStringParameter() throws IOException {
         GeoPointClusteringTileRequest request = parse(Map.of("q", "category:cafe"));
         BoolQueryBuilder query = (BoolQueryBuilder) request.toSearchRequest().source().query();

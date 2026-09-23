@@ -49,6 +49,7 @@ final class GeoPointClusteringTileRequest {
         PARSER.declareInt((r, v) -> r.radius = v, new ParseField("radius"));
         PARSER.declareInt((r, v) -> r.extent = v, new ParseField("extent"));
         PARSER.declareDouble((r, v) -> r.ratio = v, new ParseField("ratio"));
+        PARSER.declareBoolean((r, v) -> r.cluster = v, new ParseField("cluster"));
         PARSER.declareInt((r, v) -> r.clusterMaxZoom = v, new ParseField("cluster_max_zoom"));
         PARSER.declareInt((r, v) -> r.mvtExtent = v, new ParseField("mvt_extent"));
         PARSER.declareInt((r, v) -> r.buffer = v, new ParseField("buffer"));
@@ -73,6 +74,8 @@ final class GeoPointClusteringTileRequest {
     int radius = GeoPointClusteringAggregationBuilder.DEFAULT_RADIUS;
     int extent = GeoPointClusteringAggregationBuilder.DEFAULT_EXTENT;
     double ratio = GeoPointClusteringAggregationBuilder.DEFAULT_RATIO;
+    /** Whether documents are clustered at all. Turning it off serves every document of the tile as a point. */
+    boolean cluster = true;
     int clusterMaxZoom = 16;
     int mvtExtent = 4096;
     /** Query buffer, in {@link #extent} pixels. Defaults to twice the clustering radius. */
@@ -102,6 +105,7 @@ final class GeoPointClusteringTileRequest {
         request.radius = restRequest.paramAsInt("radius", request.radius);
         request.extent = restRequest.paramAsInt("extent", request.extent);
         request.ratio = restRequest.paramAsDouble("ratio", request.ratio);
+        request.cluster = restRequest.paramAsBoolean("cluster", request.cluster);
         request.clusterMaxZoom = restRequest.paramAsInt("cluster_max_zoom", request.clusterMaxZoom);
         request.mvtExtent = restRequest.paramAsInt("mvt_extent", request.mvtExtent);
         if (restRequest.hasParam("buffer")) {
@@ -175,7 +179,7 @@ final class GeoPointClusteringTileRequest {
 
     /** Whether this tile is served as clusters, or as raw points. */
     boolean isClustered() {
-        return zoom <= clusterMaxZoom;
+        return cluster && zoom <= clusterMaxZoom;
     }
 
     /** Zoom levels the expansion zoom of the clusters of this tile is looked up at, in ascending order. */

@@ -188,6 +188,7 @@ the whole thing:
 | `radius` | `40` | clustering radius, in `extent` pixels |
 | `extent` | `256` | tile size, in pixels, the `radius` is expressed in |
 | `ratio` | `0` | second merging pass ratio of the aggregation |
+| `cluster` | `true` | `false` serves every document of the tile as a point, at any zoom |
 | `cluster_max_zoom` | `16` | above this zoom, clustering is turned off and documents are returned as points |
 | `buffer` | `2 * radius` | pixels the queried area is expanded by, so that clusters are not cut by tile borders |
 | `mvt_extent` | `4096` | coordinate extent of the returned tile |
@@ -308,8 +309,12 @@ http.cors.allow-headers: X-Requested-With, Content-Type, Content-Length, Authori
 - Clusters are built from a buffered area around the tile, then rendered by the single tile owning their centroid:
   no cluster is cut by a tile border, and none is drawn twice.
 - Clustered tiles are aggregation only searches (`size: 0`), so they go through the shard request cache.
-- Above `cluster_max_zoom`, document positions are read from the doc values of the geo field: keep `doc_values`
-  enabled on it, which is the default.
+- Above `cluster_max_zoom`, and with `cluster=false`, document positions are read from the doc values of the geo
+  field: keep `doc_values` enabled on it, which is the default.
+- A tile of raw points holds at most `max_hits` documents, and the ones beyond are dropped in index order, which is
+  arbitrary. That is fine above `cluster_max_zoom`, where a tile covers little ground, but `cluster=false` at low zoom
+  hands a whole region to a single tile: keep a query narrow enough, or raise `max_hits` (and `index.max_result_window`
+  with it).
 - `expansion_zoom` costs one extra aggregation per zoom level looked ahead. Each level holds roughly four times more
   clusters than the one above it, so the levels share a bucket budget instead of each being allowed `size` buckets: a
   tile never asks for much more than twice `size` buckets, whatever the depth, and stays clear of `search.max_buckets`.
