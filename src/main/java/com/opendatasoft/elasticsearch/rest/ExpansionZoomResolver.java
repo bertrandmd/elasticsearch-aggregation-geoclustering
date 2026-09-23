@@ -21,17 +21,22 @@ public final class ExpansionZoomResolver {
     }
 
     /**
-     * @param parents the clusters to compute an expansion zoom for
-     * @param zooms   the zoom levels {@code levels} have been computed at, in ascending order
-     * @param levels  the same clustering, run at each of the {@code zooms} levels
-     * @return the expansion zoom of each parent cluster, keyed by cluster hash. Clusters that do not break within the
-     *         requested zoom levels are mapped to the deepest zoom level that was looked at, which still moves the map
-     *         closer to the split.
+     * @param parents   the clusters to compute an expansion zoom for
+     * @param zooms     the zoom levels {@code levels} have been computed at, in ascending order
+     * @param levels    the same clustering, run at each of the {@code zooms} levels
+     * @param levelSize the number of buckets a level was allowed to return; a level returning that many has been
+     *                  truncated, so it cannot establish that a cluster does not split
+     * @return the expansion zoom of each parent cluster, keyed by cluster hash. A cluster that does not break within
+     *         the requested zoom levels is mapped to the deepest zoom that was looked at, which still moves the map
+     *         closer to the split. A cluster whose absence of split could not be established, because a level was
+     *         truncated, is left out: better no answer than a wrong one, the caller can fall back to the expansion
+     *         endpoint, which is exact.
      */
     public static Map<Long, Integer> resolve(
         List<InternalGeoPointClustering.Bucket> parents,
         int[] zooms,
-        List<InternalGeoPointClustering> levels
+        List<InternalGeoPointClustering> levels,
+        int levelSize
     ) {
         Map<Long, Integer> expansionZooms = new HashMap<>();
         if (parents.isEmpty() || zooms.length == 0) {
@@ -47,11 +52,16 @@ public final class ExpansionZoomResolver {
             }
         }
 
+        boolean truncated = false;
         for (int level = 0; level < zooms.length && level < levels.size(); level++) {
             InternalGeoPointClustering clustering = levels.get(level);
             if (clustering == null) {
+                truncated = true;
                 continue;
             }
+            // Buckets beyond the limit are dropped, so a cluster may look unsplit although it is not. Splits that are
+            // seen remain true, hence the level is still worth looking at.
+            truncated |= clustering.getBuckets().size() >= levelSize;
 
             Map<Long, Integer> childCounts = new HashMap<>();
             for (InternalGeoPointClustering.Bucket child : clustering.getBuckets()) {
@@ -68,9 +78,11 @@ public final class ExpansionZoomResolver {
             }
         }
 
-        int deepestZoom = zooms[zooms.length - 1];
-        for (InternalGeoPointClustering.Bucket parent : parents) {
-            expansionZooms.putIfAbsent(parent.hashAsLong(), deepestZoom);
+        if (truncated == false) {
+            int deepestZoom = zooms[zooms.length - 1];
+            for (InternalGeoPointClustering.Bucket parent : parents) {
+                expansionZooms.putIfAbsent(parent.hashAsLong(), deepestZoom);
+            }
         }
         return expansionZooms;
     }

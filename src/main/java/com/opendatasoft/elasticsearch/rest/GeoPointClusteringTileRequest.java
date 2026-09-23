@@ -39,6 +39,7 @@ final class GeoPointClusteringTileRequest {
 
     private static final int MAX_MVT_EXTENT = 16384;
     private static final int MAX_EXPANSION_ZOOM_DEPTH = 8;
+    private static final int MIN_EXPANSION_SIZE = 100;
 
     private static final ObjectParser<GeoPointClusteringTileRequest, Void> PARSER = new ObjectParser<>("geo_point_clustering_mvt");
 
@@ -206,14 +207,14 @@ final class GeoPointClusteringTileRequest {
 
         if (isClustered()) {
             source.size(0);
-            GeoPointClusteringAggregationBuilder clusters = clusteringAggregation(CLUSTERS_AGG, zoom);
+            GeoPointClusteringAggregationBuilder clusters = clusteringAggregation(CLUSTERS_AGG, zoom, size);
             TopHitsAggregationBuilder leaf = leafAggregation();
             if (leaf != null) {
                 clusters.subAggregation(leaf);
             }
             source.aggregation(clusters);
             for (int expansionZoomLevel : expansionZooms()) {
-                source.aggregation(clusteringAggregation(EXPANSION_AGG_PREFIX + expansionZoomLevel, expansionZoomLevel));
+                source.aggregation(clusteringAggregation(EXPANSION_AGG_PREFIX + expansionZoomLevel, expansionZoomLevel, expansionSize()));
             }
         } else {
             source.size(maxHits);
@@ -238,13 +239,27 @@ final class GeoPointClusteringTileRequest {
         return QueryBuilders.geoBoundingBoxQuery(field).setCorners(bounds[3], bounds[0], bounds[1], bounds[2]);
     }
 
-    private GeoPointClusteringAggregationBuilder clusteringAggregation(String name, int aggregationZoom) {
+    /**
+     * Buckets the expansion zoom levels may return, each. Deeper levels hold exponentially more clusters, so they
+     * share a budget instead of each being allowed {@link #size} buckets: a tile then never asks for much more than
+     * twice {@code size} buckets, whatever the depth, and stays clear of the {@code search.max_buckets} limit. A level
+     * hitting that budget is reported as truncated rather than as an absence of split.
+     */
+    int expansionSize() {
+        int levels = expansionZooms().length;
+        if (levels == 0) {
+            return size;
+        }
+        return Math.max(MIN_EXPANSION_SIZE, size / levels);
+    }
+
+    private GeoPointClusteringAggregationBuilder clusteringAggregation(String name, int aggregationZoom, int bucketCount) {
         return new GeoPointClusteringAggregationBuilder(name).field(field)
             .zoom(aggregationZoom)
             .radius(radius)
             .extent(extent)
             .ratio(ratio)
-            .size(size);
+            .size(bucketCount);
     }
 
     /**

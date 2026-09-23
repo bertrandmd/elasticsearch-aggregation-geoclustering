@@ -235,7 +235,9 @@ map.on('click', 'clusters', (e) => {
 ```
 
 A cluster that does not break within `expansion_zoom_depth` levels reports the deepest level that was looked at, which
-still moves the map closer to the split. When the exact value is needed, ask for it:
+still moves the map closer to the split. A cluster whose absence of split could not be established, because a level
+returned more clusters than it was allowed to, carries no `expansion_zoom` at all: an absent property means "ask", not
+"does not split". When the exact value is needed, ask for it:
 
 ```
 GET  /<index>/_geo_point_clustering/_expansion/<field>?zoom=12&cells=u09tz,u09tw
@@ -299,9 +301,13 @@ http.cors.allow-headers: X-Requested-With, Content-Type, Content-Length, Authori
 - Clustered tiles are aggregation only searches (`size: 0`), so they go through the shard request cache.
 - Above `cluster_max_zoom`, document positions are read from the doc values of the geo field: keep `doc_values`
   enabled on it, which is the default.
-- `expansion_zoom` costs one extra aggregation per zoom level looked ahead. Lower `expansion_zoom_depth`, or turn it
-  off with `expansion_zoom=false` and use the expansion endpoint instead, on very large tiles. Mind
-  `search.max_buckets` too: a tile runs `1 + expansion_zoom_depth` aggregations of up to `size` buckets each.
+- `expansion_zoom` costs one extra aggregation per zoom level looked ahead. Each level holds roughly four times more
+  clusters than the one above it, so the levels share a bucket budget instead of each being allowed `size` buckets: a
+  tile never asks for much more than twice `size` buckets, whatever the depth, and stays clear of `search.max_buckets`.
+  The counterpart is that on a dense area a deep level gets truncated and the clusters it cannot rule out lose their
+  `expansion_zoom`; raise `size` to look further, or leave the exact answer to the expansion endpoint on click.
+- A deep `expansion_zoom_depth` mostly pays off at high zoom, where a tile holds few documents. At low zoom prefer a
+  depth of 2 or 3, or `expansion_zoom=false` plus the expansion endpoint.
 
 
 ## Development environment setup

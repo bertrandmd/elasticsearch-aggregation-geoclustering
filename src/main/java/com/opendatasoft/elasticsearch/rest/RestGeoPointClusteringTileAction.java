@@ -107,7 +107,8 @@ public class RestGeoPointClusteringTileAction extends BaseRestHandler {
         Map<Long, Integer> expansionZoomByCluster = ExpansionZoomResolver.resolve(
             ownedClusters,
             expansionZooms,
-            expansionLevels(aggregations, expansionZooms)
+            expansionLevels(aggregations, expansionZooms),
+            request.expansionSize()
         );
 
         for (InternalGeoPointClustering.Bucket cluster : ownedClusters) {

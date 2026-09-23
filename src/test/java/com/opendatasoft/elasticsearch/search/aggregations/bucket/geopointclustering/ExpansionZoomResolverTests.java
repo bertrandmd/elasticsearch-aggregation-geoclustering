@@ -20,7 +20,12 @@ public class ExpansionZoomResolverTests extends ESTestCase {
         // Two clusters at the next zoom level, both inside the parent cell: the cluster expands right away.
         InternalGeoPointClustering level = clustering(bucket(2, "u09tx"), bucket(1, "u09tz"));
 
-        Map<Long, Integer> expansionZooms = ExpansionZoomResolver.resolve(List.of(parent), new int[] { 10, 11 }, List.of(level, level));
+        Map<Long, Integer> expansionZooms = ExpansionZoomResolver.resolve(
+            List.of(parent),
+            new int[] { 10, 11 },
+            List.of(level, level),
+            Integer.MAX_VALUE
+        );
         assertEquals(Integer.valueOf(10), expansionZooms.get(parent.hashAsLong()));
     }
 
@@ -32,7 +37,8 @@ public class ExpansionZoomResolverTests extends ESTestCase {
         Map<Long, Integer> expansionZooms = ExpansionZoomResolver.resolve(
             List.of(parent),
             new int[] { 10, 11, 12 },
-            Arrays.asList(stillTogether, stillTogether, split)
+            Arrays.asList(stillTogether, stillTogether, split),
+            Integer.MAX_VALUE
         );
         assertEquals(Integer.valueOf(12), expansionZooms.get(parent.hashAsLong()));
     }
@@ -44,7 +50,8 @@ public class ExpansionZoomResolverTests extends ESTestCase {
         Map<Long, Integer> expansionZooms = ExpansionZoomResolver.resolve(
             List.of(parent),
             new int[] { 10, 11, 12 },
-            Arrays.asList(stillTogether, stillTogether, stillTogether)
+            Arrays.asList(stillTogether, stillTogether, stillTogether),
+            Integer.MAX_VALUE
         );
         assertEquals(Integer.valueOf(12), expansionZooms.get(parent.hashAsLong()));
     }
@@ -58,7 +65,8 @@ public class ExpansionZoomResolverTests extends ESTestCase {
         Map<Long, Integer> expansionZooms = ExpansionZoomResolver.resolve(
             List.of(left, right),
             new int[] { 10, 11 },
-            List.of(level, level)
+            List.of(level, level),
+            Integer.MAX_VALUE
         );
         assertEquals(Integer.valueOf(11), expansionZooms.get(left.hashAsLong()));
         assertEquals(Integer.valueOf(10), expansionZooms.get(right.hashAsLong()));
@@ -74,7 +82,8 @@ public class ExpansionZoomResolverTests extends ESTestCase {
         Map<Long, Integer> expansionZooms = ExpansionZoomResolver.resolve(
             List.of(parent),
             new int[] { 10, 11 },
-            Arrays.asList(merged, split)
+            Arrays.asList(merged, split),
+            Integer.MAX_VALUE
         );
         assertEquals(Integer.valueOf(11), expansionZooms.get(parent.hashAsLong()));
     }
@@ -84,14 +93,46 @@ public class ExpansionZoomResolverTests extends ESTestCase {
         InternalGeoPointClustering.Bucket parent = bucket(3, "u09tx", "u09tz");
         InternalGeoPointClustering split = clustering(bucket(2, "u09tx"), bucket(1, "u09tz"));
 
-        Map<Long, Integer> expansionZooms = ExpansionZoomResolver.resolve(List.of(parent), new int[] { 10 }, List.of(split));
+        Map<Long, Integer> expansionZooms = ExpansionZoomResolver.resolve(
+            List.of(parent),
+            new int[] { 10 },
+            List.of(split),
+            Integer.MAX_VALUE
+        );
         assertEquals(Integer.valueOf(10), expansionZooms.get(parent.hashAsLong()));
     }
 
     public void testNoZoomLevelToLookAt() {
         InternalGeoPointClustering.Bucket parent = bucket(3, "u09t");
-        assertEquals(Collections.emptyMap(), ExpansionZoomResolver.resolve(List.of(parent), new int[0], List.of()));
-        assertEquals(Collections.emptyMap(), ExpansionZoomResolver.resolve(List.of(), new int[] { 10 }, List.of()));
+        assertEquals(Collections.emptyMap(), ExpansionZoomResolver.resolve(List.of(parent), new int[0], List.of(), Integer.MAX_VALUE));
+        assertEquals(Collections.emptyMap(), ExpansionZoomResolver.resolve(List.of(), new int[] { 10 }, List.of(), Integer.MAX_VALUE));
+    }
+
+    public void testATruncatedLevelCannotRuleOutASplit() {
+        InternalGeoPointClustering.Bucket unsplit = ClusteringTestFixtures.bucket(9, "u09t");
+        InternalGeoPointClustering.Bucket split = ClusteringTestFixtures.bucket(4, "u09w");
+        // Two buckets returned for a level allowed to return two: the level is truncated.
+        InternalGeoPointClustering truncatedLevel = clustering(bucket(9, "u09tx"), bucket(4, "u09w5"));
+
+        Map<Long, Integer> expansionZooms = ExpansionZoomResolver.resolve(
+            List.of(unsplit, split),
+            new int[] { 10 },
+            List.of(truncatedLevel),
+            2
+        );
+
+        // Nothing can be said of the cluster that did not split: better no expansion zoom than a wrong one.
+        assertNull(expansionZooms.get(unsplit.hashAsLong()));
+        assertNull(expansionZooms.get(split.hashAsLong()));
+    }
+
+    public void testASplitSeenInATruncatedLevelIsStillReported() {
+        InternalGeoPointClustering.Bucket parent = bucket(9, "u09t");
+        // Truncation only drops buckets, so the two children that made it through do prove the split.
+        InternalGeoPointClustering truncatedLevel = clustering(bucket(5, "u09tx"), bucket(4, "u09tz"));
+
+        Map<Long, Integer> expansionZooms = ExpansionZoomResolver.resolve(List.of(parent), new int[] { 10 }, List.of(truncatedLevel), 2);
+        assertEquals(Integer.valueOf(10), expansionZooms.get(parent.hashAsLong()));
     }
 
     private static InternalGeoPointClustering clustering(InternalGeoPointClustering.Bucket... buckets) {

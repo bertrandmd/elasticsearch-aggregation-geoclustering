@@ -133,6 +133,21 @@ public class GeoPointClusteringTileRequestTests extends ESTestCase {
         assertEquals(0, parse(Map.of("expansion_zoom_depth", "0")).expansionZooms().length);
     }
 
+    public void testExpansionLevelsShareABucketBudget() throws IOException {
+        // Deeper levels hold exponentially more clusters: they share the budget of one level instead of each being
+        // allowed `size` buckets, which keeps a tile clear of search.max_buckets whatever the depth.
+        GeoPointClusteringTileRequest deep = parse(Map.of("size", "10000", "expansion_zoom_depth", "8"));
+        assertEquals(8, deep.expansionZooms().length);
+        assertEquals(1250, deep.expansionSize());
+
+        GeoPointClusteringTileRequest shallow = parse(Map.of("size", "10000", "expansion_zoom_depth", "1"));
+        assertEquals(10000, shallow.expansionSize());
+
+        SearchSourceBuilder source = deep.toSearchRequest().source();
+        assertEquals(10000, aggregation(source, "clusters").size());
+        assertEquals(1250, aggregation(source, "expansion_17").size());
+    }
+
     public void testLeafAggregationIsSkippedWhenNothingIsFetched() throws IOException {
         GeoPointClusteringTileRequest request = parse(Map.of("include_id", "false"));
         GeoPointClusteringAggregationBuilder clusters = aggregation(request.toSearchRequest().source(), "clusters");

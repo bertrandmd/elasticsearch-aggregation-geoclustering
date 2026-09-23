@@ -372,7 +372,9 @@ async function expandCluster(feature) {
   const [lon, lat] = feature.geometry.coordinates;
   let target = Number(feature.properties.expansion_zoom);
 
-  if (state.exactExpansion && feature.properties.geohash_grids && map.getZoom() < 25) {
+  // La tuile omet expansion_zoom quand un niveau d'expansion a été tronqué : on demande alors la valeur exacte.
+  const missing = !Number.isFinite(target);
+  if ((state.exactExpansion || missing) && feature.properties.geohash_grids && map.getZoom() < 25) {
     try {
       const expansion = await exactExpansionZoom(feature);
       target = expansion.zoom;
