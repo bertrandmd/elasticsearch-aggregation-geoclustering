@@ -4,8 +4,19 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: elasticsearch-plugin-debug
+      args:
+        # Keep these in sync with gradle.properties.
+        ES_VERSION: 8.19.19
+        PLUGIN_VERSION: 8.19.19.0
     environment:
       - discovery.type=single-node
+      # Security is on by default since 8.0: turning it off keeps 9200 on plain
+      # HTTP without credentials, which is what the examples and the test page use.
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      # Browsers need CORS to read the vector tiles directly from Elasticsearch.
+      - http.cors.enabled=true
+      - http.cors.allow-origin=*
       # NO DEBUG
       - ES_JAVA_OPTS=-Xms512m -Xmx512m
       # DEBUG
