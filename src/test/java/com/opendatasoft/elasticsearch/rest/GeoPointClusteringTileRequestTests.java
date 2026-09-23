@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.Matchers.contains;
@@ -62,8 +63,10 @@ public class GeoPointClusteringTileRequestTests extends ESTestCase {
 
         GeoPointClusteringAggregationBuilder clusters = aggregation(source, "clusters");
         assertEquals(9, clusters.zoom());
-        assertEquals(1, clusters.getSubAggregations().size());
-        assertEquals("leaf", clusters.getSubAggregations().iterator().next().getName());
+        assertEquals(
+            Set.of("leaf", "bounds"),
+            clusters.getSubAggregations().stream().map(AggregationBuilder::getName).collect(Collectors.toSet())
+        );
         assertEquals(11, aggregation(source, "expansion_11").zoom());
 
         GeoBoundingBoxQueryBuilder boundingBox = boundingBox(source);
@@ -148,10 +151,20 @@ public class GeoPointClusteringTileRequestTests extends ESTestCase {
         assertEquals(1250, aggregation(source, "expansion_17").size());
     }
 
-    public void testLeafAggregationIsSkippedWhenNothingIsFetched() throws IOException {
-        GeoPointClusteringTileRequest request = parse(Map.of("include_id", "false"));
+    public void testSubAggregationsAreSkippedWhenNothingNeedsThem() throws IOException {
+        GeoPointClusteringTileRequest request = parse(Map.of("include_id", "false", "expansion_zoom", "false"));
         GeoPointClusteringAggregationBuilder clusters = aggregation(request.toSearchRequest().source(), "clusters");
         assertThat(clusters.getSubAggregations(), empty());
+
+        // The bounds are only read to answer the expansion zoom.
+        GeoPointClusteringTileRequest withoutExpansion = parse(Map.of("expansion_zoom", "false"));
+        assertEquals(
+            List.of("leaf"),
+            aggregation(withoutExpansion.toSearchRequest().source(), "clusters").getSubAggregations()
+                .stream()
+                .map(AggregationBuilder::getName)
+                .toList()
+        );
     }
 
     public void testPreferenceAndRoutingArePassedThrough() throws IOException {

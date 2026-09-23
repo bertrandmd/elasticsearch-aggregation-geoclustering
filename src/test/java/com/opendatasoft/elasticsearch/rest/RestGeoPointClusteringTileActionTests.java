@@ -16,6 +16,7 @@ import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.SearchHits;
 import org.elasticsearch.search.aggregations.InternalAggregations;
+import org.elasticsearch.search.aggregations.metrics.InternalGeoBounds;
 import org.elasticsearch.search.aggregations.metrics.InternalTopHits;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.test.rest.FakeRestRequest;
@@ -115,6 +116,58 @@ public class RestGeoPointClusteringTileActionTests extends ESTestCase {
         );
 
         assertEquals(11L, layers.get("clusters").features().get(0).properties().get("expansion_zoom"));
+    }
+
+    public void testClusterOfDocumentsOnTheSameSpotExpandsPastClusterMaxZoom() throws IOException {
+        // Ten documents on the very same spot: no zoom level ever breaks them apart, the only way to see them is the
+        // raw points served above cluster_max_zoom. Answering anything else means clicking the cluster over and over.
+        InternalGeoPointClustering.Bucket cluster = ClusteringTestFixtures.bucket(
+            10,
+            "u09tk",
+            48.8748171,
+            2.4034479,
+            InternalAggregations.from(List.of(geoBounds(48.8748171, 48.8748171, 2.4034479, 2.4034479)))
+        );
+
+        Map<String, VectorTileDecoder.Layer> layers = tile(
+            Map.of("cluster_max_zoom", "18", "expansion_zoom_depth", "2"),
+            InternalAggregations.from(
+                List.of(
+                    ClusteringTestFixtures.clustering("clusters", cluster),
+                    ClusteringTestFixtures.clustering("expansion_10", ClusteringTestFixtures.bucket(10, "u09tk7")),
+                    ClusteringTestFixtures.clustering("expansion_11", ClusteringTestFixtures.bucket(10, "u09tk7"))
+                )
+            )
+        );
+
+        assertEquals(19L, layers.get("clusters").features().get(0).properties().get("expansion_zoom"));
+    }
+
+    public void testSpreadOutClusterKeepsTheZoomFoundByTheLevels() throws IOException {
+        InternalGeoPointClustering.Bucket cluster = ClusteringTestFixtures.bucket(
+            10,
+            "u09tk",
+            48.85,
+            2.4,
+            InternalAggregations.from(List.of(geoBounds(48.90, 48.80, 2.30, 2.45)))
+        );
+
+        Map<String, VectorTileDecoder.Layer> layers = tile(
+            Map.of("expansion_zoom_depth", "2"),
+            InternalAggregations.from(
+                List.of(
+                    ClusteringTestFixtures.clustering("clusters", cluster),
+                    ClusteringTestFixtures.clustering(
+                        "expansion_10",
+                        ClusteringTestFixtures.bucket(6, "u09tk7"),
+                        ClusteringTestFixtures.bucket(4, "u09tkh")
+                    ),
+                    ClusteringTestFixtures.clustering("expansion_11", ClusteringTestFixtures.bucket(10, "u09tk7"))
+                )
+            )
+        );
+
+        assertEquals(10L, layers.get("clusters").features().get(0).properties().get("expansion_zoom"));
     }
 
     public void testPointCountAbbreviation() throws IOException {
@@ -242,6 +295,20 @@ public class RestGeoPointClusteringTileActionTests extends ESTestCase {
         params.putAll(parameters);
         return GeoPointClusteringTileRequest.parse(
             new FakeRestRequest.Builder(xContentRegistry()).withMethod(RestRequest.Method.GET).withParams(params).build()
+        );
+    }
+
+    private static InternalGeoBounds geoBounds(double top, double bottom, double left, double right) {
+        return new InternalGeoBounds(
+            GeoPointClusteringTileRequest.BOUNDS_AGG,
+            top,
+            bottom,
+            left,
+            right,
+            Double.POSITIVE_INFINITY,
+            Double.NEGATIVE_INFINITY,
+            true,
+            null
         );
     }
 

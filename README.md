@@ -234,10 +234,19 @@ map.on('click', 'clusters', (e) => {
 });
 ```
 
-A cluster that does not break within `expansion_zoom_depth` levels reports the deepest level that was looked at, which
-still moves the map closer to the split. A cluster whose absence of split could not be established, because a level
-returned more clusters than it was allowed to, carries no `expansion_zoom` at all: an absent property means "ask", not
-"does not split". When the exact value is needed, ask for it:
+The tile also measures how far apart the documents of a cluster are, and turns that span into the earliest zoom the
+cluster can possibly break at: as long as the clustering radius stays wider than the whole cluster, every point is
+within reach of every other one and no zoom level separates anything. That bound answers for the clusters the levels
+could not conclude on. Documents sitting on the very same spot span nothing, never break apart at any zoom, and get
+`cluster_max_zoom + 1` straight away — the raw points served above that zoom are the only way to see them. It also
+means a shallow `expansion_zoom_depth` behaves well: the levels give the exact answer for the clusters about to
+separate, the span covers the tight ones.
+
+A cluster that does not break within `expansion_zoom_depth` levels, and whose span does not place the split further
+either, reports the deepest level that was looked at, which still moves the map closer to the split. A cluster whose
+absence of split could not be established at all, because a level returned more clusters than it was allowed to,
+carries no `expansion_zoom`: an absent property means "ask", not "does not split". When the exact value is needed, ask
+for it:
 
 ```
 GET  /<index>/_geo_point_clustering/_expansion/<field>?zoom=12&cells=u09tz,u09tw
@@ -306,8 +315,9 @@ http.cors.allow-headers: X-Requested-With, Content-Type, Content-Length, Authori
   tile never asks for much more than twice `size` buckets, whatever the depth, and stays clear of `search.max_buckets`.
   The counterpart is that on a dense area a deep level gets truncated and the clusters it cannot rule out lose their
   `expansion_zoom`; raise `size` to look further, or leave the exact answer to the expansion endpoint on click.
-- A deep `expansion_zoom_depth` mostly pays off at high zoom, where a tile holds few documents. At low zoom prefer a
-  depth of 2 or 3, or `expansion_zoom=false` plus the expansion endpoint.
+- A deep `expansion_zoom_depth` mostly pays off at high zoom, where a tile holds few documents. A depth of 2 or 3 is
+  usually enough, since the span of a cluster covers the levels that were not looked at.
+- Asking for `expansion_zoom` adds a `geo_bounds` sub-aggregation to the tile, which is what measures that span.
 
 
 ## Development environment setup

@@ -2,6 +2,7 @@ package com.opendatasoft.elasticsearch.rest;
 
 import com.opendatasoft.elasticsearch.mvt.VectorTile;
 import com.opendatasoft.elasticsearch.mvt.WebMercator;
+import com.opendatasoft.elasticsearch.search.aggregations.bucket.geopointclustering.GeoPointClusteringParams;
 import com.opendatasoft.elasticsearch.search.aggregations.bucket.geopointclustering.InternalGeoPointClustering;
 
 import org.elasticsearch.action.search.SearchResponse;
@@ -9,6 +10,7 @@ import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.document.DocumentField;
 import org.elasticsearch.common.geo.GeoPoint;
+import org.elasticsearch.common.geo.GeoUtils;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
@@ -18,6 +20,7 @@ import org.elasticsearch.rest.action.RestResponseListener;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.SearchHits;
 import org.elasticsearch.search.aggregations.InternalAggregations;
+import org.elasticsearch.search.aggregations.metrics.InternalGeoBounds;
 import org.elasticsearch.search.aggregations.metrics.InternalTopHits;
 
 import java.io.IOException;
@@ -127,12 +130,58 @@ public class RestGeoPointClusteringTileAction extends BaseRestHandler {
             properties.put("point_count", cluster.getDocCount());
             properties.put("point_count_abbreviated", abbreviate(cluster.getDocCount()));
             properties.put("geohash_grids", String.join(",", cluster.getGeohashGrids()));
-            Integer expansionZoom = expansionZoomByCluster.get(cluster.hashAsLong());
+            Integer expansionZoom = expansionZoom(request, cluster, expansionZoomByCluster, expansionZooms);
             if (expansionZoom != null) {
                 properties.put("expansion_zoom", expansionZoom);
             }
             clustersLayer.addPoint(coordinates[0], coordinates[1], null, properties);
         }
+    }
+
+    /**
+     * Expansion zoom of a cluster, from two sources: the deeper zoom levels the tile looked at, which give the exact
+     * answer when they see the cluster break, and the span of the cluster, which tells at the earliest when it can
+     * break at all. The span alone answers for the clusters the levels could not conclude on, which is what keeps a
+     * pile of documents sitting on the same spot from being expanded one level at a time.
+     */
+    private static Integer expansionZoom(
+        GeoPointClusteringTileRequest request,
+        InternalGeoPointClustering.Bucket cluster,
+        Map<Long, Integer> expansionZoomByCluster,
+        int[] expansionZooms
+    ) {
+        if (expansionZooms.length == 0) {
+            return null;
+        }
+        int deepestZoom = expansionZooms[expansionZooms.length - 1];
+        int cap = Math.min(request.clusterMaxZoom + 1, GeoPointClusteringParams.MAX_ZOOM);
+
+        Integer fromLevels = expansionZoomByCluster.get(cluster.hashAsLong());
+        Integer fromSpan = minimumSplitZoom(request, cluster, cap);
+
+        if (fromLevels != null) {
+            return Math.min(fromSpan == null ? fromLevels : Math.max(fromLevels, fromSpan), cap);
+        }
+        // The levels could not rule a split out, but the span can still place it beyond them.
+        if (fromSpan != null && fromSpan > deepestZoom) {
+            return Math.min(fromSpan, cap);
+        }
+        return null;
+    }
+
+    private static Integer minimumSplitZoom(GeoPointClusteringTileRequest request, InternalGeoPointClustering.Bucket cluster, int cap) {
+        InternalGeoBounds bounds = cluster.getAggregations().get(GeoPointClusteringTileRequest.BOUNDS_AGG);
+        if (bounds == null) {
+            return null;
+        }
+        GeoPoint topLeft = bounds.topLeft();
+        GeoPoint bottomRight = bounds.bottomRight();
+        if (topLeft == null || bottomRight == null) {
+            return null;
+        }
+        // The diagonal of the bounding box is as far apart as two documents of the cluster can be.
+        double span = GeoUtils.arcDistance(topLeft.getLat(), topLeft.getLon(), bottomRight.getLat(), bottomRight.getLon());
+        return ExpansionZoomResolver.minimumSplitZoom(span, cluster.getCentroid().getLat(), request.radius, request.extent, cap);
     }
 
     private static void addRawFeatures(GeoPointClusteringTileRequest request, SearchHits hits, VectorTile.Layer poisLayer) {

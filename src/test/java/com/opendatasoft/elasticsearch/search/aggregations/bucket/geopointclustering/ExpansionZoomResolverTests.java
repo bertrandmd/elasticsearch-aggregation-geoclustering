@@ -135,6 +135,21 @@ public class ExpansionZoomResolverTests extends ESTestCase {
         assertEquals(Integer.valueOf(10), expansionZooms.get(parent.hashAsLong()));
     }
 
+    public void testDocumentsOnTheSameSpotNeverSplit() {
+        assertEquals(19, ExpansionZoomResolver.minimumSplitZoom(0, 50.87, 80, 512, 19));
+    }
+
+    public void testSplitZoomFromTheSpanOfACluster() {
+        // radius 80 px on 512 px tiles is 20 m wide at zoom 18 around Brussels: a cluster 20 m across cannot break
+        // before that.
+        assertEquals(18, ExpansionZoomResolver.minimumSplitZoom(20, 50.87, 80, 512, 25));
+        assertEquals(15, ExpansionZoomResolver.minimumSplitZoom(160, 50.87, 80, 512, 25));
+        // A cluster wider than the radius of the current zoom is free to break right away.
+        assertEquals(0, ExpansionZoomResolver.minimumSplitZoom(60_000_000, 50.87, 80, 512, 25));
+        // The answer never goes past what the caller can use.
+        assertEquals(12, ExpansionZoomResolver.minimumSplitZoom(20, 50.87, 80, 512, 12));
+    }
+
     private static InternalGeoPointClustering clustering(InternalGeoPointClustering.Bucket... buckets) {
         return ClusteringTestFixtures.clustering("clusters", buckets);
     }

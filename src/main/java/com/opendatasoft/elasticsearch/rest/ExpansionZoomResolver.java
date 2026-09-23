@@ -2,6 +2,8 @@ package com.opendatasoft.elasticsearch.rest;
 
 import com.opendatasoft.elasticsearch.search.aggregations.bucket.geopointclustering.InternalGeoPointClustering;
 
+import org.elasticsearch.common.geo.GeoUtils;
+
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,6 +20,35 @@ public final class ExpansionZoomResolver {
 
     private ExpansionZoomResolver() {
         throw new AssertionError("No instances intended");
+    }
+
+    /**
+     * Lowest zoom at which a cluster can possibly break apart, read from the span of its documents.
+     * <p>
+     * Clusters are merged while their parts are closer than the radius, and the radius halves at every zoom level. As
+     * long as it stays wider than the whole cluster, every point is within reach of every other one and no zoom level
+     * can break the cluster: the first level narrower than the span is therefore a lower bound of the expansion zoom.
+     * Documents sitting on the very same spot span nothing and never break apart, which is what {@code maxZoom} is
+     * returned for.
+     *
+     * @param spanMeters   how far apart the documents of the cluster are, at most
+     * @param latitude     latitude of the cluster, the radius is corrected by it during the merge
+     * @param radiusPixels clustering radius, in {@code extent} pixels
+     * @param extent       tile size, in pixels, the radius is expressed in
+     * @param maxZoom      deepest zoom worth returning, usually {@code cluster_max_zoom + 1}
+     * @return the lowest zoom the cluster can break apart at, or 0 when the span puts no constraint on it
+     */
+    public static int minimumSplitZoom(double spanMeters, double latitude, double radiusPixels, int extent, int maxZoom) {
+        if (spanMeters <= 0) {
+            return maxZoom;
+        }
+        double latitudeCorrection = Math.max(Math.cos(Math.toRadians(latitude)), 1e-6);
+        // radiusPixels * EARTH_EQUATOR / (extent * 2^zoom) * cos(latitude) < spanMeters
+        double tiles = radiusPixels * GeoUtils.EARTH_EQUATOR * latitudeCorrection / (extent * spanMeters);
+        if (tiles <= 1) {
+            return 0;
+        }
+        return Math.min((int) Math.floor(Math.log(tiles) / Math.log(2)) + 1, maxZoom);
     }
 
     /**

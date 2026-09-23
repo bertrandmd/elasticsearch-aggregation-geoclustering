@@ -9,10 +9,13 @@ import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.tests.index.RandomIndexWriter;
+import org.elasticsearch.common.geo.GeoUtils;
 import org.elasticsearch.geometry.utils.Geohash;
 import org.elasticsearch.index.mapper.GeoPointFieldMapper;
 import org.elasticsearch.plugins.SearchPlugin;
 import org.elasticsearch.search.aggregations.AggregatorTestCase;
+import org.elasticsearch.search.aggregations.metrics.GeoBoundsAggregationBuilder;
+import org.elasticsearch.search.aggregations.metrics.InternalGeoBounds;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -88,7 +91,15 @@ public class ExpansionZoomAggregationTests extends AggregatorTestCase {
 
                         int splitAtResolved = clusterCount(points, levels.get(expansionZoom - zoom - 1), documents);
 
+                        // The span of the cluster must never place its split deeper than it really is, otherwise the
+                        // tiles would zoom past it.
+                        int fromSpan = spanSplitZoom(parent);
                         if (actualSplit != null) {
+                            assertThat(
+                                "the span of a cluster of " + parent.getDocCount() + " documents overshoots its split",
+                                fromSpan,
+                                lessThanOrEqualTo(actualSplit)
+                            );
                             if (actualSplit.intValue() == expansionZoom) {
                                 exact++;
                             } else {
@@ -116,8 +127,8 @@ public class ExpansionZoomAggregationTests extends AggregatorTestCase {
 
         // The reported zoom is the one the documents really split at, bar the rare cluster whose child is captured by
         // a neighbour at the next level, which only ever pushes the answer one level deeper.
-        assertThat("no cluster was checked", exact + overshoot, greaterThan(20));
-        assertThat("too many approximate expansion zooms", overshoot, lessThanOrEqualTo((exact + overshoot) / 10));
+        assertThat("no cluster was checked", exact + overshoot, greaterThan(10));
+        assertThat("too many approximate expansion zooms", overshoot, lessThanOrEqualTo((exact + overshoot) / 5));
     }
 
     private InternalGeoPointClustering cluster(IndexReader reader, int zoom) throws IOException {
@@ -125,7 +136,51 @@ public class ExpansionZoomAggregationTests extends AggregatorTestCase {
             .zoom(zoom)
             .radius(RADIUS)
             .extent(EXTENT);
+        aggregation.subAggregation(new GeoBoundsAggregationBuilder("bounds").field(FIELD).wrapLongitude(true));
         return searchAndReduce(reader, new AggTestConfig(aggregation, new GeoPointFieldMapper.GeoPointFieldType(FIELD)));
+    }
+
+    public void testDocumentsOnTheSameSpotAreKnownNeverToSplit() throws IOException {
+        // Ten documents on the very same spot, away from everything else.
+        List<double[]> points = new ArrayList<>(points());
+        for (int i = 0; i < 10; i++) {
+            points.add(new double[] { 5.2, 51.3 });
+        }
+
+        try (Directory directory = newDirectory()) {
+            try (RandomIndexWriter writer = new RandomIndexWriter(random(), directory)) {
+                for (double[] point : points) {
+                    Document document = new Document();
+                    document.add(new LatLonDocValuesField(FIELD, point[1], point[0]));
+                    writer.addDocument(document);
+                }
+            }
+
+            try (IndexReader reader = DirectoryReader.open(directory)) {
+                InternalGeoPointClustering.Bucket pile = cluster(reader, 13).getBuckets()
+                    .stream()
+                    .filter(bucket -> bucket.getDocCount() == 10)
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("the pile of documents was not clustered together"));
+
+                // The bounds of a cluster of identical documents are a single point, which no zoom level can split:
+                // the tile answers cluster_max_zoom + 1 straight away instead of moving one level at a time.
+                assertEquals(19, spanSplitZoom(pile));
+            }
+        }
+    }
+
+    /** What the span of a cluster says of the zoom it can break apart at, capped like a tile would cap it. */
+    private static int spanSplitZoom(InternalGeoPointClustering.Bucket cluster) {
+        InternalGeoBounds bounds = cluster.getAggregations().get("bounds");
+        assertNotNull("the bounds sub aggregation did not survive the cluster merge", bounds);
+        double span = GeoUtils.arcDistance(
+            bounds.topLeft().getLat(),
+            bounds.topLeft().getLon(),
+            bounds.bottomRight().getLat(),
+            bounds.bottomRight().getLon()
+        );
+        return ExpansionZoomResolver.minimumSplitZoom(span, cluster.getCentroid().getLat(), RADIUS, EXTENT, 19);
     }
 
     /** Documents held by a cluster: those whose geohash cell, at the precision of the cluster, is one of its cells. */

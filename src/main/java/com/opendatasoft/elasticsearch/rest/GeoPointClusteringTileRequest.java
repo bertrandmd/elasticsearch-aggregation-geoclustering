@@ -12,6 +12,7 @@ import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.action.RestActions;
+import org.elasticsearch.search.aggregations.metrics.GeoBoundsAggregationBuilder;
 import org.elasticsearch.search.aggregations.metrics.TopHitsAggregationBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.fetch.subphase.FetchSourceContext;
@@ -35,6 +36,7 @@ final class GeoPointClusteringTileRequest {
 
     static final String CLUSTERS_AGG = "clusters";
     static final String LEAF_AGG = "leaf";
+    static final String BOUNDS_AGG = "bounds";
     static final String EXPANSION_AGG_PREFIX = "expansion_";
 
     private static final int MAX_MVT_EXTENT = 16384;
@@ -211,6 +213,11 @@ final class GeoPointClusteringTileRequest {
             TopHitsAggregationBuilder leaf = leafAggregation();
             if (leaf != null) {
                 clusters.subAggregation(leaf);
+            }
+            if (expansionZooms().length > 0) {
+                // The span of a cluster tells when it can break apart at the earliest, and tells for sure that a
+                // cluster of points sitting on the same spot never will.
+                clusters.subAggregation(new GeoBoundsAggregationBuilder(BOUNDS_AGG).field(field).wrapLongitude(true));
             }
             source.aggregation(clusters);
             for (int expansionZoomLevel : expansionZooms()) {
